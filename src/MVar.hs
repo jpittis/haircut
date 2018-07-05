@@ -1,10 +1,8 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase                 #-}
-module Lib
-    ( Config(..)
-    , CircuitBreakerState
-    , newCircuitBreaker
-    , withCircuitBreaker
+{-# LANGUAGE InstanceSigs               #-}
+module MVar
+    ( CircuitBreaker
     ) where
 
 import Control.Monad.Reader
@@ -12,44 +10,42 @@ import Control.Concurrent.MVar
 import Data.Time.Clock.POSIX   (getPOSIXTime)
 import Control.Exception       (catch, IOException, throwIO)
 
-data Config = Config
-  { errorThreshold   :: Int
-  , errorTimeout     :: Int
-  }
+import Generic
 
 data State = Closed | Open | HalfOpen
 
-data CircuitBreakerState = CircuitBreakerState
+data CircuitBreaker = CircuitBreaker
   { config    :: Config
   , state     :: MVar State
   , errors    :: MVar [Int]
   }
 
 newtype CircuitBreakerT m a = CircuitBreakerT
-  { unCircuitBreakerT :: ReaderT CircuitBreakerState m a
+  { unCircuitBreakerT :: ReaderT CircuitBreaker m a
   } deriving ( Functor
              , Applicative
              , Monad
              , MonadIO
-             , MonadReader CircuitBreakerState )
+             , MonadReader CircuitBreaker )
 
-runCircuitBreakerT :: CircuitBreakerState -> CircuitBreakerT m a -> m a
+runCircuitBreakerT :: CircuitBreaker -> CircuitBreakerT m a -> m a
 runCircuitBreakerT s m = runReaderT (unCircuitBreakerT m) s
 
-newCircuitBreaker :: Config -> IO CircuitBreakerState
-newCircuitBreaker config = do
-  state  <- newMVar Closed
-  errors <- newMVar []
-  return CircuitBreakerState
-    { config = config
-    , state  = state
-    , errors = errors
-    }
+instance GenCircuitBreaker CircuitBreaker where
+  newCircuitBreaker :: Config -> IO CircuitBreaker
+  newCircuitBreaker config = do
+    state  <- newMVar Closed
+    errors <- newMVar []
+    return CircuitBreaker
+      { config = config
+      , state  = state
+      , errors = errors
+      }
 
-withCircuitBreaker :: CircuitBreakerState -> IO a -> IO a
-withCircuitBreaker state f = runCircuitBreakerT state (withCircuit f)
+  withCircuitBreaker :: CircuitBreaker -> IO a -> IO (Maybe a)
+  withCircuitBreaker state f = runCircuitBreakerT state (withCircuit f)
 
-withCircuit :: IO a -> CircuitBreakerT IO a
+withCircuit :: IO a -> CircuitBreakerT IO (Maybe a)
 withCircuit f =
   currentState >>= \case
     Open     -> withOpen f
@@ -59,7 +55,7 @@ withCircuit f =
     currentState :: CircuitBreakerT IO State
     currentState = asks state >>= liftIO . readMVar
 
-withOpen :: IO a -> CircuitBreakerT IO a
+withOpen :: IO a -> CircuitBreakerT IO (Maybe a)
 withOpen f = errorTimeoutExpired >>= \case
   True  -> changeState HalfOpen >> dropOldErrors >> withHalfOpen f
   False -> liftIO $ ioError (userError "circuit open!")
@@ -72,15 +68,19 @@ withOpen f = errorTimeoutExpired >>= \case
         first:_ -> return $ first + errorTimeout < current
         _       -> return True
 
-withHalfOpen :: IO a -> CircuitBreakerT IO a
-withHalfOpen f = liftIO (runAndCatch f) >>= \case
-  Left e  -> changeState Open   >> liftIO (throwIO e)
-  Right a -> changeState Closed >> return a
+withHalfOpen :: IO a -> CircuitBreakerT IO (Maybe a)
+withHalfOpen f = do
+  result <- liftIO (runAndCatch f)
+  case result of
+    Left e  -> changeState Open   >> return Nothing
+    Right v -> changeState Closed >> (return $ Just v)
 
-withClosed :: IO a -> CircuitBreakerT IO a
-withClosed f = liftIO (runAndCatch f) >>= \case
-  Right a -> return a
-  Left e  -> addError >> possiblyOpen >> liftIO (throwIO e)
+withClosed :: IO a -> CircuitBreakerT IO (Maybe a)
+withClosed f = do
+  result <- liftIO (runAndCatch f)
+  case result of
+    Left e  -> addError >> possiblyOpen >> return Nothing
+    Right v -> (return $ Just v)
   where
     addError :: CircuitBreakerT IO ()
     addError = do

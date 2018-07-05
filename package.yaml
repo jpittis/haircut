@@ -27,6 +27,8 @@ library:
   dependencies:
   - mtl
   - time
+  - stm
+  - safe-exceptions
 
 tests:
   haircut-test:
