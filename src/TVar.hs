@@ -2,6 +2,7 @@
 {-# LANGUAGE InstanceSigs #-}
 module TVar
     ( CircuitBreaker
+    , new
     ) where
 
 import Control.Concurrent.STM
@@ -19,6 +20,9 @@ data CircuitBreaker = CircuitBreaker
   , state  :: TVar State
   , errors :: TVar [Int]
   }
+
+new :: Config -> IO CircuitBreaker
+new = newCircuitBreaker
 
 instance GenCircuitBreaker CircuitBreaker where
   newCircuitBreaker :: Config -> IO CircuitBreaker

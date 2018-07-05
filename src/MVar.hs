@@ -3,12 +3,13 @@
 {-# LANGUAGE InstanceSigs               #-}
 module MVar
     ( CircuitBreaker
+    , new
     ) where
 
 import Control.Monad.Reader
 import Control.Concurrent.MVar
 import Data.Time.Clock.POSIX   (getPOSIXTime)
-import Control.Exception       (catch, IOException, throwIO)
+import Control.Exception.Safe  (catch, IOException, throwIO)
 
 import Generic
 
@@ -30,6 +31,9 @@ newtype CircuitBreakerT m a = CircuitBreakerT
 
 runCircuitBreakerT :: CircuitBreaker -> CircuitBreakerT m a -> m a
 runCircuitBreakerT s m = runReaderT (unCircuitBreakerT m) s
+
+new :: Config -> IO CircuitBreaker
+new = newCircuitBreaker
 
 instance GenCircuitBreaker CircuitBreaker where
   newCircuitBreaker :: Config -> IO CircuitBreaker
@@ -58,7 +62,7 @@ withCircuit f =
 withOpen :: IO a -> CircuitBreakerT IO (Maybe a)
 withOpen f = errorTimeoutExpired >>= \case
   True  -> changeState HalfOpen >> dropOldErrors >> withHalfOpen f
-  False -> liftIO $ ioError (userError "circuit open!")
+  False -> return Nothing
   where
     errorTimeoutExpired :: CircuitBreakerT IO Bool
     errorTimeoutExpired = do
@@ -79,7 +83,7 @@ withClosed :: IO a -> CircuitBreakerT IO (Maybe a)
 withClosed f = do
   result <- liftIO (runAndCatch f)
   case result of
-    Left e  -> addError >> possiblyOpen >> return Nothing
+    Left e  -> addError >> possiblyOpen >> liftIO (throwIO e)
     Right v -> (return $ Just v)
   where
     addError :: CircuitBreakerT IO ()
